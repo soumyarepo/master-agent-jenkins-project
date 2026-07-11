@@ -9,22 +9,26 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
-
-        // Prevent Jenkins from automatically checking out the repository
         skipDefaultCheckout(true)
     }
 
     stages {
 
-        stage('Agent 1 - Checkout') {
+        stage('Worker 1 - Checkout, Build and Test') {
             agent {
-                label 'worker-1'
+                node {
+                    label 'worker-1'
+
+                    // Use a fixed workspace instead of workspace@2
+                    customWorkspace '/home/ec2-user/jenkins/workspace/master-agent-worker1'
+                }
             }
 
             steps {
-                cleanWs()
+                // Clean only this fixed workspace
+                deleteDir()
 
-                echo 'Checking out source code on Worker-1...'
+                echo 'Checking out the source code on Worker-1...'
 
                 checkout([
                     $class: 'GitSCM',
@@ -46,83 +50,54 @@ pipeline {
                     ]]
                 ])
 
-                sh '''
-                    echo "========================================"
-                    echo "CHECKOUT STAGE"
-                    echo "Running on: $(hostname)"
-                    echo "Workspace:  $(pwd)"
-                    echo "========================================"
-
-                    echo "Repository contents:"
-                    ls -la
-
-                    echo "Finding pom.xml:"
-                    find . -name pom.xml -print
-
-                    echo "Tool versions:"
-                    git --version
-                    java -version
-                    javac -version
-                    mvn -version
-                '''
-
-                /*
-                 * Store the project source temporarily in Jenkins.
-                 * The next stage will retrieve it without cloning again.
-                 */
-                stash name: 'project-source',
-                      includes: 'jenkins-master-agent-mini-project/**',
-                      useDefaultExcludes: false
-            }
-        }
-
-        stage('Agent 1 - Build and Test') {
-            agent {
-                label 'worker-1'
-            }
-
-            steps {
-                cleanWs()
-
-                echo 'Retrieving source code on Worker-1...'
-
-                unstash 'project-source'
-
                 dir('jenkins-master-agent-mini-project') {
 
                     sh '''
+                        #!/bin/bash
+
+                        set -e
+
                         echo "========================================"
-                        echo "BUILD AND TEST ON WORKER-1"
-                        echo "Running on: $(hostname)"
-                        echo "Workspace:  $(pwd)"
+                        echo "CHECKOUT, BUILD AND TEST"
                         echo "========================================"
+
+                        echo "Running on:"
+                        hostname
+
+                        echo "Current user:"
+                        whoami
+
+                        echo "Workspace:"
+                        pwd
 
                         echo "Project files:"
                         ls -la
 
-                        echo "Java version:"
+                        echo "========================================"
+                        echo "TOOL VERSIONS"
+                        echo "========================================"
+
+                        git --version
                         java -version
-
-                        echo "Java compiler version:"
                         javac -version
-
-                        echo "Maven version:"
                         mvn -version
 
-                        echo "Running Maven build..."
+                        echo "========================================"
+                        echo "RUNNING MAVEN BUILD"
+                        echo "========================================"
+
                         mvn clean test package
 
-                        echo "Generated files:"
+                        echo "========================================"
+                        echo "GENERATED ARTIFACT"
+                        echo "========================================"
+
                         ls -lh target/
                     '''
 
                     junit testResults: 'target/surefire-reports/*.xml',
                           allowEmptyResults: false
 
-                    /*
-                     * Store only the generated JAR.
-                     * Worker-2 will retrieve this JAR.
-                     */
                     stash name: 'java-application',
                           includes: 'target/*.jar',
                           allowEmpty: false
@@ -130,26 +105,42 @@ pipeline {
             }
         }
 
-        stage('Agent 2 - Receive and Verify') {
+        stage('Worker 2 - Receive, Verify and Run') {
             agent {
-                label 'worker-2'
+                node {
+                    label 'worker-2'
+
+                    // Use a separate fixed workspace on Worker-2
+                    customWorkspace '/home/ec2-user/jenkins/workspace/master-agent-worker2'
+                }
             }
 
             steps {
-                cleanWs()
+                deleteDir()
 
                 dir('jenkins-master-agent-mini-project') {
 
-                    echo 'Receiving JAR file on Worker-2...'
+                    echo 'Receiving the JAR file on Worker-2...'
 
                     unstash 'java-application'
 
                     sh '''
+                        #!/bin/bash
+
+                        set -e
+
                         echo "========================================"
-                        echo "VERIFY ARTIFACT ON WORKER-2"
-                        echo "Running on: $(hostname)"
-                        echo "Workspace:  $(pwd)"
+                        echo "VERIFY AND RUN ON WORKER-2"
                         echo "========================================"
+
+                        echo "Running on:"
+                        hostname
+
+                        echo "Current user:"
+                        whoami
+
+                        echo "Workspace:"
+                        pwd
 
                         echo "Java version:"
                         java -version
@@ -157,34 +148,29 @@ pipeline {
                         echo "Received artifact:"
                         ls -lh target/
 
-                        echo "Checking whether the JAR exists..."
+                        JAR_FILE=$(find target -maxdepth 1 -name "*.jar" \
+                            ! -name "*sources.jar" \
+                            ! -name "*javadoc.jar" \
+                            | head -1)
 
-                        test -s target/jenkins-master-agent-demo-1.0.0.jar
+                        if [ -z "$JAR_FILE" ]; then
+                            echo "ERROR: No JAR file was found."
+                            exit 1
+                        fi
 
-                        echo "JAR verification successful."
-                    '''
-                }
-            }
-        }
+                        if [ ! -s "$JAR_FILE" ]; then
+                            echo "ERROR: JAR file is empty."
+                            exit 1
+                        fi
 
-        stage('Agent 2 - Run Application') {
-            agent {
-                label 'worker-2'
-            }
+                        echo "JAR verification successful:"
+                        echo "$JAR_FILE"
 
-            steps {
-                dir('jenkins-master-agent-mini-project') {
-
-                    sh '''
                         echo "========================================"
-                        echo "RUN APPLICATION ON WORKER-2"
-                        echo "Running on: $(hostname)"
-                        echo "Workspace:  $(pwd)"
+                        echo "RUNNING APPLICATION"
                         echo "========================================"
 
-                        echo "Running Java application..."
-
-                        java -jar target/jenkins-master-agent-demo-1.0.0.jar
+                        java -jar "$JAR_FILE"
                     '''
 
                     archiveArtifacts artifacts: 'target/*.jar',
@@ -204,16 +190,16 @@ pipeline {
             ========================================
 
             Worker-1:
-            - Checked out the source code
-            - Compiled the Java application
-            - Executed the unit tests
+            - Checked out the repository
+            - Built the Java application
+            - Ran the unit tests
             - Created the JAR file
 
             Worker-2:
             - Received the JAR file
             - Verified the JAR file
             - Ran the Java application
-            - Archived the final artifact
+            - Archived the artifact
             '''
         }
 
@@ -223,8 +209,8 @@ pipeline {
             PIPELINE FAILED
             ========================================
 
-            Open the Console Output and identify
-            the stage where the failure occurred.
+            Open Console Output and check the
+            exact stage where the failure occurred.
             '''
         }
 
