@@ -7,8 +7,10 @@ pipeline {
     }
 
     stages {
+
         stage('Agent 1 - Checkout') {
             agent { label 'worker-1' }
+
             steps {
                 cleanWs()
                 checkout scm
@@ -19,6 +21,13 @@ pipeline {
                     echo "Running on: $(hostname)"
                     echo "Workspace:  $(pwd)"
                     echo "========================================"
+
+                    echo "Repository contents:"
+                    ls -la
+
+                    echo "Finding pom.xml:"
+                    find . -name pom.xml -print
+
                     git --version
                     java -version
                     mvn -version
@@ -28,71 +37,107 @@ pipeline {
 
         stage('Agent 1 - Build and Test') {
             agent { label 'worker-1' }
+
             steps {
                 checkout scm
 
-                sh '''
-                    echo "========================================"
-                    echo "BUILD AND TEST ON WORKER-1"
-                    echo "Running on: $(hostname)"
-                    echo "========================================"
-                    mvn clean test package
-                    ls -lh target/
-                '''
+                dir('jenkins-master-agent-mini-project') {
 
-                junit testResults: 'target/surefire-reports/*.xml',
-                      allowEmptyResults: false
+                    sh '''
+                        echo "========================================"
+                        echo "BUILD AND TEST ON WORKER-1"
+                        echo "Running on: $(hostname)"
+                        echo "Workspace:  $(pwd)"
+                        echo "========================================"
 
-                stash name: 'java-application',
-                      includes: 'target/*.jar'
+                        echo "Project files:"
+                        ls -la
+
+                        echo "Running Maven build..."
+                        mvn clean test package
+
+                        echo "Generated artifacts:"
+                        ls -lh target/
+                    '''
+
+                    junit testResults: 'target/surefire-reports/*.xml',
+                          allowEmptyResults: false
+
+                    stash name: 'java-application',
+                          includes: 'target/*.jar'
+                }
             }
         }
 
         stage('Agent 2 - Receive and Verify') {
             agent { label 'worker-2' }
+
             steps {
                 cleanWs()
-                unstash 'java-application'
 
-                sh '''
-                    echo "========================================"
-                    echo "VERIFY ARTIFACT ON WORKER-2"
-                    echo "Running on: $(hostname)"
-                    echo "Workspace:  $(pwd)"
-                    echo "========================================"
-                    java -version
-                    ls -lh target/
-                    test -s target/jenkins-master-agent-demo-1.0.0.jar
-                '''
+                dir('jenkins-master-agent-mini-project') {
+
+                    unstash 'java-application'
+
+                    sh '''
+                        echo "========================================"
+                        echo "VERIFY ARTIFACT ON WORKER-2"
+                        echo "Running on: $(hostname)"
+                        echo "Workspace:  $(pwd)"
+                        echo "========================================"
+
+                        java -version
+
+                        echo "Received artifact:"
+                        ls -lh target/
+
+                        test -s target/jenkins-master-agent-demo-1.0.0.jar
+
+                        echo "JAR verification successful."
+                    '''
+                }
             }
         }
 
         stage('Agent 2 - Run Application') {
             agent { label 'worker-2' }
+
             steps {
-                unstash 'java-application'
+                dir('jenkins-master-agent-mini-project') {
 
-                sh '''
-                    echo "========================================"
-                    echo "RUN APPLICATION ON WORKER-2"
-                    echo "Running on: $(hostname)"
-                    echo "========================================"
-                    java -jar target/jenkins-master-agent-demo-1.0.0.jar
-                '''
+                    sh '''
+                        echo "========================================"
+                        echo "RUN APPLICATION ON WORKER-2"
+                        echo "Running on: $(hostname)"
+                        echo "Workspace:  $(pwd)"
+                        echo "========================================"
 
-                archiveArtifacts artifacts: 'target/*.jar',
-                                 fingerprint: true
+                        java -jar target/jenkins-master-agent-demo-1.0.0.jar
+                    '''
+
+                    archiveArtifacts artifacts: 'target/*.jar',
+                                     fingerprint: true
+                }
             }
         }
     }
 
     post {
         success {
-            echo 'SUCCESS: Worker-1 built and tested the application, and Worker-2 verified and ran it.'
+            echo '''
+            SUCCESS:
+            Worker-1 checked out, built and tested the application.
+            Worker-2 received, verified and ran the JAR file.
+            '''
         }
+
         failure {
-            echo 'FAILED: Open Console Output and identify the failed stage.'
+            echo '''
+            FAILED:
+            Open Console Output and check which stage failed.
+            '''
         }
+
         always {
             echo "Pipeline completed with status: ${currentBuild.currentResult}"
         }
