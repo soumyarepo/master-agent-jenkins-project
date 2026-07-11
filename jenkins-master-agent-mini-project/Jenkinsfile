@@ -1,5 +1,6 @@
 pipeline {
     agent none
+
     environment {
         JAVA_HOME = '/usr/lib/jvm/java-21-amazon-corretto.x86_64'
         PATH = "${JAVA_HOME}/bin:${env.PATH}"
@@ -8,16 +9,42 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+
+        // Prevent Jenkins from automatically checking out the repository
+        skipDefaultCheckout(true)
     }
 
     stages {
 
         stage('Agent 1 - Checkout') {
-            agent { label 'worker-1' }
+            agent {
+                label 'worker-1'
+            }
 
             steps {
                 cleanWs()
-                checkout scm
+
+                echo 'Checking out source code on Worker-1...'
+
+                checkout([
+                    $class: 'GitSCM',
+
+                    branches: [[
+                        name: '*/main'
+                    ]],
+
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/soumyarepo/master-agent-jenkins-project.git'
+                    ]],
+
+                    extensions: [[
+                        $class: 'CloneOption',
+                        shallow: true,
+                        depth: 1,
+                        noTags: true,
+                        timeout: 10
+                    ]]
+                ])
 
                 sh '''
                     echo "========================================"
@@ -32,18 +59,34 @@ pipeline {
                     echo "Finding pom.xml:"
                     find . -name pom.xml -print
 
+                    echo "Tool versions:"
                     git --version
                     java -version
+                    javac -version
                     mvn -version
                 '''
+
+                /*
+                 * Store the project source temporarily in Jenkins.
+                 * The next stage will retrieve it without cloning again.
+                 */
+                stash name: 'project-source',
+                      includes: 'jenkins-master-agent-mini-project/**',
+                      useDefaultExcludes: false
             }
         }
 
         stage('Agent 1 - Build and Test') {
-            agent { label 'worker-1' }
+            agent {
+                label 'worker-1'
+            }
 
             steps {
-                checkout scm
+                cleanWs()
+
+                echo 'Retrieving source code on Worker-1...'
+
+                unstash 'project-source'
 
                 dir('jenkins-master-agent-mini-project') {
 
@@ -57,29 +100,47 @@ pipeline {
                         echo "Project files:"
                         ls -la
 
+                        echo "Java version:"
+                        java -version
+
+                        echo "Java compiler version:"
+                        javac -version
+
+                        echo "Maven version:"
+                        mvn -version
+
                         echo "Running Maven build..."
                         mvn clean test package
 
-                        echo "Generated artifacts:"
+                        echo "Generated files:"
                         ls -lh target/
                     '''
 
                     junit testResults: 'target/surefire-reports/*.xml',
                           allowEmptyResults: false
 
+                    /*
+                     * Store only the generated JAR.
+                     * Worker-2 will retrieve this JAR.
+                     */
                     stash name: 'java-application',
-                          includes: 'target/*.jar'
+                          includes: 'target/*.jar',
+                          allowEmpty: false
                 }
             }
         }
 
         stage('Agent 2 - Receive and Verify') {
-            agent { label 'worker-2' }
+            agent {
+                label 'worker-2'
+            }
 
             steps {
                 cleanWs()
 
                 dir('jenkins-master-agent-mini-project') {
+
+                    echo 'Receiving JAR file on Worker-2...'
 
                     unstash 'java-application'
 
@@ -90,10 +151,13 @@ pipeline {
                         echo "Workspace:  $(pwd)"
                         echo "========================================"
 
+                        echo "Java version:"
                         java -version
 
                         echo "Received artifact:"
                         ls -lh target/
+
+                        echo "Checking whether the JAR exists..."
 
                         test -s target/jenkins-master-agent-demo-1.0.0.jar
 
@@ -104,7 +168,9 @@ pipeline {
         }
 
         stage('Agent 2 - Run Application') {
-            agent { label 'worker-2' }
+            agent {
+                label 'worker-2'
+            }
 
             steps {
                 dir('jenkins-master-agent-mini-project') {
@@ -116,29 +182,49 @@ pipeline {
                         echo "Workspace:  $(pwd)"
                         echo "========================================"
 
+                        echo "Running Java application..."
+
                         java -jar target/jenkins-master-agent-demo-1.0.0.jar
                     '''
 
                     archiveArtifacts artifacts: 'target/*.jar',
-                                     fingerprint: true
+                                     fingerprint: true,
+                                     onlyIfSuccessful: true
                 }
             }
         }
     }
 
     post {
+
         success {
             echo '''
-            SUCCESS:
-            Worker-1 checked out, built and tested the application.
-            Worker-2 received, verified and ran the JAR file.
+            ========================================
+            PIPELINE SUCCESSFUL
+            ========================================
+
+            Worker-1:
+            - Checked out the source code
+            - Compiled the Java application
+            - Executed the unit tests
+            - Created the JAR file
+
+            Worker-2:
+            - Received the JAR file
+            - Verified the JAR file
+            - Ran the Java application
+            - Archived the final artifact
             '''
         }
 
         failure {
             echo '''
-            FAILED:
-            Open Console Output and check which stage failed.
+            ========================================
+            PIPELINE FAILED
+            ========================================
+
+            Open the Console Output and identify
+            the stage where the failure occurred.
             '''
         }
 
