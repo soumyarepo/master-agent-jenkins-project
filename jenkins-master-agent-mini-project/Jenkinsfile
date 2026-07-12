@@ -1,24 +1,217 @@
 pipeline {
-    agent {
-        label 'worker-1'
+    agent none
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
     }
 
     stages {
-        stage('Shell Test') {
-            steps {
-                sh '''
-                    set -eux
-                    whoami
-                    id
-                    pwd
-                    echo "Jenkins shell execution is working"
-                    java -version
-                    git --version
-                    df -h
-                    df -i
-                    mount | grep -E " /home | / "
-                '''
+
+        stage('Worker 1 - Checkout, Build and Test') {
+            agent {
+                label 'worker-1'
             }
+
+            environment {
+                JAVA_HOME = '/usr/lib/jvm/java-21-amazon-corretto.x86_64'
+                PATH = "${JAVA_HOME}/bin:${env.PATH}"
+            }
+
+            steps {
+                deleteDir()
+
+                echo 'Checking out the source code on Worker-1...'
+
+                checkout([
+                    $class: 'GitSCM',
+
+                    branches: [[
+                        name: '*/main'
+                    ]],
+
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/soumyarepo/master-agent-jenkins-project.git'
+                    ]],
+
+                    extensions: [[
+                        $class: 'CloneOption',
+                        shallow: true,
+                        depth: 1,
+                        noTags: true,
+                        timeout: 10
+                    ]]
+                ])
+
+                dir('jenkins-master-agent-mini-project') {
+
+                    sh '''#!/bin/bash
+set -eux
+
+echo "========================================"
+echo "CHECKOUT, BUILD AND TEST"
+echo "========================================"
+
+echo "Running on:"
+hostname
+
+echo "Current user:"
+whoami
+
+echo "Workspace:"
+pwd
+
+echo "Project files:"
+ls -la
+
+echo "========================================"
+echo "TOOL VERSIONS"
+echo "========================================"
+
+git --version
+java -version
+javac -version
+mvn -version
+
+echo "========================================"
+echo "RUNNING MAVEN BUILD"
+echo "========================================"
+
+mvn clean test package
+
+echo "========================================"
+echo "GENERATED ARTIFACT"
+echo "========================================"
+
+ls -lh target/
+'''
+
+                    junit(
+                        testResults: 'target/surefire-reports/*.xml',
+                        allowEmptyResults: false
+                    )
+
+                    stash(
+                        name: 'java-application',
+                        includes: 'target/*.jar',
+                        allowEmpty: false
+                    )
+                }
+            }
+        }
+
+        stage('Worker 2 - Receive, Verify and Run') {
+            agent {
+                label 'worker-2'
+            }
+
+            environment {
+                JAVA_HOME = '/usr/lib/jvm/java-21-amazon-corretto.x86_64'
+                PATH = "${JAVA_HOME}/bin:${env.PATH}"
+            }
+
+            steps {
+                deleteDir()
+
+                dir('jenkins-master-agent-mini-project') {
+
+                    echo 'Receiving the JAR file on Worker-2...'
+
+                    unstash 'java-application'
+
+                    sh '''#!/bin/bash
+set -eux
+
+echo "========================================"
+echo "VERIFY AND RUN ON WORKER-2"
+echo "========================================"
+
+echo "Running on:"
+hostname
+
+echo "Current user:"
+whoami
+
+echo "Workspace:"
+pwd
+
+echo "Java version:"
+java -version
+
+echo "Received artifact:"
+ls -lh target/
+
+JAR_FILE=$(find target -maxdepth 1 \
+    -name "*.jar" \
+    ! -name "*sources.jar" \
+    ! -name "*javadoc.jar" \
+    | head -1)
+
+if [ -z "$JAR_FILE" ]; then
+    echo "ERROR: No JAR file was found."
+    exit 1
+fi
+
+if [ ! -s "$JAR_FILE" ]; then
+    echo "ERROR: JAR file is empty."
+    exit 1
+fi
+
+echo "JAR verification successful:"
+echo "$JAR_FILE"
+
+echo "========================================"
+echo "RUNNING APPLICATION"
+echo "========================================"
+
+java -jar "$JAR_FILE"
+'''
+
+                    archiveArtifacts(
+                        artifacts: 'target/*.jar',
+                        fingerprint: true,
+                        onlyIfSuccessful: true
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '''
+========================================
+PIPELINE SUCCESSFUL
+========================================
+
+Worker-1:
+- Checked out the repository
+- Built the Java application
+- Ran the unit tests
+- Created the JAR file
+
+Worker-2:
+- Received the JAR file
+- Verified the JAR file
+- Ran the Java application
+- Archived the artifact
+'''
+        }
+
+        failure {
+            echo '''
+========================================
+PIPELINE FAILED
+========================================
+
+Open Console Output and check the exact
+stage where the failure occurred.
+'''
+        }
+
+        always {
+            echo "Pipeline completed with status: ${currentBuild.currentResult}"
         }
     }
 }
