@@ -15,18 +15,15 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-
-        <!-- Worker nodes are using Java 21 -->
         <maven.compiler.release>21</maven.compiler.release>
-
-        <junit.version>4.13.2</junit.version>
+        <junit.version>5.11.4</junit.version>
     </properties>
 
     <dependencies>
 
         <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
